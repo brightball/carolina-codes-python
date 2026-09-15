@@ -61,6 +61,16 @@ _ready = False
 _count_lock = threading.Lock()
 
 
+def select_from(cols: str, table: str, where: str = "", order: str = "") -> str:
+    # Call sites pass module-level column lists and fixed WHERE clauses; values use %s.
+    sql = "SELECT " + cols + " FROM " + table  # nosec B608
+    if where:
+        sql += " WHERE " + where
+    if order:
+        sql += " ORDER BY " + order
+    return sql
+
+
 def listen_host() -> str:
     return "::"
 
@@ -70,6 +80,14 @@ def reset_counts() -> None:
     with _count_lock:
         SQL_COUNT = 0
         CONNECT_COUNT = 0
+
+
+def reset_pool() -> None:
+    global _opened, _ready
+    with _pool_lock:
+        _idle.clear()
+        _opened = 0
+        _ready = False
 
 
 def dsn() -> str:
@@ -158,13 +176,18 @@ def talks_for(cur, slug, year=None):
     if year is None:
         rows = db_query(
             cur,
-            f"SELECT {TALK_COLS} FROM v1_talks WHERE speaker_slug = %s ORDER BY year DESC",
+            select_from(TALK_COLS, "v1_talks", "speaker_slug = %s", "year DESC"),
             (slug,),
         )
     else:
         rows = db_query(
             cur,
-            f"SELECT {TALK_COLS} FROM v1_talks WHERE speaker_slug = %s AND year = %s ORDER BY year DESC",
+            select_from(
+                TALK_COLS,
+                "v1_talks",
+                "speaker_slug = %s AND year = %s",
+                "year DESC",
+            ),
             (slug, year),
         )
     return [clean(r) for r in rows]
@@ -199,18 +222,30 @@ def sponsor_years(cur, slug):
 
 
 def load_speaker(cur, slug):
-    return clean(db_query_one(cur, f"SELECT {SPEAKER_COLS} FROM v1_speakers WHERE slug = %s", (slug,)))
+    return clean(
+        db_query_one(
+            cur,
+            select_from(SPEAKER_COLS, "v1_speakers", "slug = %s"),
+            (slug,),
+        )
+    )
 
 
 def list_speakers(cur, year=None):
     if year is None:
-        rows = db_query(cur, f"SELECT {SPEAKER_COLS} FROM v1_speakers ORDER BY last_name, first_name")
+        rows = db_query(
+            cur,
+            select_from(SPEAKER_COLS, "v1_speakers", order="last_name, first_name"),
+        )
         return [clean(r) for r in rows]
     rows = db_query(
         cur,
-        f"SELECT {SPEAKER_COLS} FROM v1_speakers "
-        "WHERE slug IN (SELECT speaker_slug FROM v1_talks WHERE year = %s) "
-        "ORDER BY last_name, first_name",
+        select_from(
+            SPEAKER_COLS,
+            "v1_speakers",
+            "slug IN (SELECT speaker_slug FROM v1_talks WHERE year = %s)",
+            "last_name, first_name",
+        ),
         (year,),
     )
     return attach_year_tags(cur, [clean(r) for r in rows], year)
@@ -241,7 +276,7 @@ def attach_year_tags(cur, speakers, year):
 def load_talks_for_year(cur, year):
     rows = db_query(
         cur,
-        f"SELECT {TALK_COLS} FROM v1_talks WHERE year = %s ORDER BY speaker_slug, year DESC",
+        select_from(TALK_COLS, "v1_talks", "year = %s", "speaker_slug, year DESC"),
         (year,),
     )
     out = {}
@@ -320,18 +355,18 @@ def dispatch(cur, path, parts, qs):
         if year:
             rows = db_query(
                 cur,
-                f"SELECT {YEAR_SPONSOR_COLS} FROM v1_year_sponsors WHERE year = %s ORDER BY name",
+                select_from(YEAR_SPONSOR_COLS, "v1_year_sponsors", "year = %s", "name"),
                 (int(year),),
             )
         else:
-            rows = db_query(cur, f"SELECT {SPONSOR_COLS} FROM v1_sponsors ORDER BY name")
+            rows = db_query(cur, select_from(SPONSOR_COLS, "v1_sponsors", order="name"))
         return 200, {"data": [clean(r) for r in rows]}
     if len(parts) == 4 and parts[0] == "v1" and parts[1] == "sponsors" and parts[2].isdigit():
         y, slug = int(parts[2]), parts[3]
         row = clean(
             db_query_one(
                 cur,
-                f"SELECT {YEAR_SPONSOR_COLS} FROM v1_year_sponsors WHERE year = %s AND slug = %s",
+                select_from(YEAR_SPONSOR_COLS, "v1_year_sponsors", "year = %s AND slug = %s"),
                 (y, slug),
             )
         )
@@ -343,7 +378,13 @@ def dispatch(cur, path, parts, qs):
         return 200, {"data": row}
     if len(parts) == 3 and parts[0] == "v1" and parts[1] == "sponsors":
         slug = parts[2]
-        row = clean(db_query_one(cur, f"SELECT {SPONSOR_COLS} FROM v1_sponsors WHERE slug = %s", (slug,)))
+        row = clean(
+            db_query_one(
+                cur,
+                select_from(SPONSOR_COLS, "v1_sponsors", "slug = %s"),
+                (slug,),
+            )
+        )
         if not row:
             return 404, {"error": "not_found"}
         rows = db_query(cur, "SELECT * FROM v1_sponsorships WHERE sponsor_slug = %s", (slug,))
@@ -403,6 +444,9 @@ def register(port: str) -> None:
     token = os.environ.get("POLYGLOT_REGISTER_TOKEN")
     if not url or not token:
         return
+    if urlparse(url).scheme not in ("http", "https"):
+        print("register: CAROLINA_URL must be http(s)", file=sys.stderr)
+        return
     base = os.environ.get("PUBLIC_BASE_URL", f"http://127.0.0.1:{port}")
     body = json.dumps(
         {
@@ -423,7 +467,7 @@ def register(port: str) -> None:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with urllib.request.urlopen(req, timeout=5) as resp:  # nosec B310
             print(f"registered with elixir: {resp.status}", file=sys.stderr)
     except Exception as exc:
         print(f"register: {exc}", file=sys.stderr)

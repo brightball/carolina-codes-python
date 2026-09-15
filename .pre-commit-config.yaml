@@ -1,0 +1,37 @@
+# Local quality gates. Emergency escape: SKIP=tests,ruff-check,ruff-format,bandit,pip-audit,gitleaks git commit
+# Install once: make hooks   (or: pre-commit install)
+repos:
+  - repo: local
+    hooks:
+      - id: tests
+        name: tests
+        language: system
+        entry: scripts/run_tests.sh
+        pass_filenames: false
+        always_run: true
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.7
+    hooks:
+      - id: ruff-check
+      - id: ruff-format
+  - repo: https://github.com/PyCQA/bandit
+    rev: 1.9.4
+    hooks:
+      - id: bandit
+        args: ["-c", "pyproject.toml", "-r", "app.py"]
+        additional_dependencies: ["bandit[toml]"]
+        pass_filenames: false
+  - repo: https://github.com/pypa/pip-audit
+    rev: v2.10.1
+    hooks:
+      - id: pip-audit
+        entry: scripts/pip_audit_locked.sh
+        pass_filenames: false
+        always_run: true
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+        language: system
+        entry: gitleaks git --redact --verbose --exit-code 1
+        pass_filenames: false

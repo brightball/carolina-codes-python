@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 import app
+from test_handlers import install_fake_catalog
 
 FAILED = 0
 
@@ -58,6 +59,14 @@ if reg >= 0:
     expect("psycopg.connect" not in fn, "register-once does not open psycopg")
 
 app.reset_counts()
+istatus, ibody = app.handle_get("/")
+expect(istatus == 200, "/ identity returns 200")
+expect(ibody.get("language") == app.LANGUAGE, "/ identity language is Python")
+expect(ibody.get("api_version") == app.API_VERSION, "/ identity includes api_version")
+expect(app.SQL_COUNT == 0, "/ identity does not run SQL")
+expect(app.CONNECT_COUNT == 0, "/ identity does not open Postgres")
+
+app.reset_counts()
 hstatus, hbody = app.handle_get("/health")
 expect(hstatus == 200, "/health returns 200")
 expect(hbody.get("ok") is True, "/health body is ok JSON")
@@ -70,28 +79,8 @@ try:
     live = True
 except Exception as exc:
     print(f"postgres unavailable, using query hook: {exc}", file=sys.stderr)
-
-    def fake_query(sql, args):
-        if "FROM v1_speakers" in sql:
-            return [{"slug": f"s{i}", "first_name": "A", "last_name": "B"} for i in range(3)]
-        if "ANY(" in sql:
-            return [{"speaker_slug": "s0", "year": 2026}, {"speaker_slug": "s0", "year": 2024}]
-        if "FROM v1_talks" in sql:
-            return [
-                {
-                    "slug": "t0",
-                    "title": "Talk",
-                    "speaker_slug": "s0",
-                    "year": 2026,
-                    "languages": ["python"],
-                    "topics": [],
-                }
-            ]
-        return []
-
-    app.CONNECT_FN = lambda: (_ for _ in ()).throw(RuntimeError("fake connect"))
-    app.QUERY_FN = fake_query
-    app.CONNECT_COUNT = 1
+    install_fake_catalog()
+    app.open_pool()
 
 boot = app.CONNECT_COUNT
 app.SQL_COUNT = 0

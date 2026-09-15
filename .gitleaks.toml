@@ -1,0 +1,12 @@
+title = "carolina-codes-python"
+
+[extend]
+useDefault = true
+
+# Shared CMS local-dev DSN from README / app.py defaults. Not a production secret.
+[[allowlists]]
+description = "Documented local-dev CMS Postgres DSN"
+regexTarget = "line"
+regexes = [
+  '''postgres://postgres:postgres@127\.0\.0\.1:5432/carolina_dev''',
+]

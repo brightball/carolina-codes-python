@@ -14,3 +14,5 @@ Postgres `v1_*` views live in the CMS database. Handler/unit tests that use a fa
 - `PUBLIC_BASE_URL` / `PORT` as in the README
 
 Do not query Ash tables. Do not fold this tree into the CMS git remote. Contract: CMS `priv/api/openapi.yaml` + `priv/api/AGENTS.md`.
+
+Quality gates: `uv sync --group dev`, then `pre-commit run --all-files` (tests, Ruff, Bandit, pip-audit, gitleaks). Gitea mirrors those as one job per check in `.gitea/workflows/precommit.yml`.

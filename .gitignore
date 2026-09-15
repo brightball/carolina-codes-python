@@ -1,3 +1,7 @@
 .venv/
 __pycache__/
 *.pyc
+.requirements-audit.txt
+.ruff_cache/
+.bandit
+.pytest_cache/

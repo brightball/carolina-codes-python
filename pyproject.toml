@@ -3,3 +3,23 @@ name = "carolina-codes-python"
 version = "0.2.0"
 requires-python = ">=3.11"
 dependencies = ["psycopg[binary]>=3.2"]
+
+[dependency-groups]
+dev = [
+    "bandit[toml]>=1.8",
+    "pip-audit>=2.8",
+    "pre-commit>=4.0",
+    "ruff>=0.12",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+extend-exclude = [".venv"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
+[tool.bandit]
+targets = ["app.py"]
+exclude_dirs = [".venv", "__pycache__"]
