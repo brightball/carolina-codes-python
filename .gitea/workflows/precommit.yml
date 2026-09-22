@@ -1,10 +1,18 @@
-# One Gitea Actions job per local quality check.
+# One Gitea Actions job per local quality check, after a shared prepare job.
 # Not a single combined job.
+#
+# act_runner starts a new container per job, so jobs cannot share a live
+# filesystem. Prepare clones GITHUB_SHA with the job token, installs uv
+# and gitleaks, uv sync --frozen --group dev, then publishes a workspace
+# tarball through the Gitea artifact API (stdlib Python, no Node).
+# Official Node artifact actions treat Gitea as GHES and abort.
+#
+# Check jobs restore that environment and run only their check. They do
+# not needs: each other, so they run in parallel after prepare.
 #
 # Empty Python image: clone GITHUB_SHA with the job token over HTTPS.
 # Gitea git HTTP returns 401 without the token. Do not git init or set
-# init.defaultBranch here. Jobs do not needs: each other so they can
-# run in parallel.
+# init.defaultBranch here.
 name: precommit
 
 on:
@@ -19,7 +27,7 @@ env:
   GITHUB_TOKEN: ${{ github.token }}
 
 jobs:
-  tests:
+  prepare:
     runs-on: ubuntu-latest
     container:
       image: docker.io/library/python:3.12-bookworm
@@ -35,91 +43,240 @@ jobs:
           git clone --depth 1 --no-checkout "https://x-access-token:${token}@${host}/${GITHUB_REPOSITORY}" .
           git fetch --depth 1 origin "${GITHUB_SHA}"
           git checkout --force FETCH_HEAD
-      - run: pip install --no-cache-dir uv
-      - run: uv sync --frozen
-      - run: uv run python perf_test.py
-      - run: uv run python -m unittest discover -s . -p 'test_*.py'
-
-  sast:
-    runs-on: ubuntu-latest
-    container:
-      image: docker.io/library/python:3.12-bookworm
-      env:
-        GITHUB_TOKEN: ${{ github.token }}
-    steps:
-      - run: apt-get update -qq && apt-get install -y --no-install-recommends git ca-certificates curl
-      - run: |
-          token="${GITHUB_TOKEN:-${GITEA_TOKEN:-}}"
-          if [ -z "$token" ]; then echo "missing job token for git fetch" >&2; exit 1; fi
-          host="${GITHUB_SERVER_URL#https://}"
-          host="${host#http://}"
-          git clone --depth 1 --no-checkout "https://x-access-token:${token}@${host}/${GITHUB_REPOSITORY}" .
-          git fetch --depth 1 origin "${GITHUB_SHA}"
-          git checkout --force FETCH_HEAD
+          git remote set-url origin "https://${host}/${GITHUB_REPOSITORY}"
       - run: pip install --no-cache-dir uv
       - run: uv sync --frozen --group dev
-      - run: uv run bandit -c pyproject.toml -r app.py
-
-  pip-audit:
-    runs-on: ubuntu-latest
-    container:
-      image: docker.io/library/python:3.12-bookworm
-      env:
-        GITHUB_TOKEN: ${{ github.token }}
-    steps:
-      - run: apt-get update -qq && apt-get install -y --no-install-recommends git ca-certificates curl
-      - run: |
-          token="${GITHUB_TOKEN:-${GITEA_TOKEN:-}}"
-          if [ -z "$token" ]; then echo "missing job token for git fetch" >&2; exit 1; fi
-          host="${GITHUB_SERVER_URL#https://}"
-          host="${host#http://}"
-          git clone --depth 1 --no-checkout "https://x-access-token:${token}@${host}/${GITHUB_REPOSITORY}" .
-          git fetch --depth 1 origin "${GITHUB_SHA}"
-          git checkout --force FETCH_HEAD
-      - run: pip install --no-cache-dir uv
-      - run: uv sync --frozen --group dev
-      - run: uv export --frozen --no-dev --no-hashes -o .requirements-audit.txt
-      - run: uv run pip-audit -r .requirements-audit.txt --progress-spinner off
-
-  gitleaks:
-    runs-on: ubuntu-latest
-    container:
-      image: docker.io/library/python:3.12-bookworm
-      env:
-        GITHUB_TOKEN: ${{ github.token }}
-    steps:
-      - run: apt-get update -qq && apt-get install -y --no-install-recommends git ca-certificates curl
-      - run: |
-          token="${GITHUB_TOKEN:-${GITEA_TOKEN:-}}"
-          if [ -z "$token" ]; then echo "missing job token for git fetch" >&2; exit 1; fi
-          host="${GITHUB_SERVER_URL#https://}"
-          host="${host#http://}"
-          git clone --depth 1 --no-checkout "https://x-access-token:${token}@${host}/${GITHUB_REPOSITORY}" .
-          git fetch --depth 1 origin "${GITHUB_SHA}"
-          git checkout --force FETCH_HEAD
       - run: |
           curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz \
             | tar -xz -C /usr/local/bin gitleaks
           gitleaks version
-      - run: gitleaks git --redact --verbose --exit-code 1
+      - run: |
+          mkdir -p .ci-bin
+          cp "$(command -v uv)" .ci-bin/uv
+          cp "$(command -v gitleaks)" .ci-bin/gitleaks
+          tar -czf /tmp/prepared-env.tar.gz .
+          mv /tmp/prepared-env.tar.gz prepared-env.tar.gz
+          python scripts/ci_artifact.py upload prepared-env prepared-env.tar.gz
 
-  lint:
+  tests:
+    needs: prepare
     runs-on: ubuntu-latest
     container:
       image: docker.io/library/python:3.12-bookworm
       env:
         GITHUB_TOKEN: ${{ github.token }}
     steps:
-      - run: apt-get update -qq && apt-get install -y --no-install-recommends git ca-certificates curl
       - run: |
-          token="${GITHUB_TOKEN:-${GITEA_TOKEN:-}}"
-          if [ -z "$token" ]; then echo "missing job token for git fetch" >&2; exit 1; fi
-          host="${GITHUB_SERVER_URL#https://}"
-          host="${host#http://}"
-          git clone --depth 1 --no-checkout "https://x-access-token:${token}@${host}/${GITHUB_REPOSITORY}" .
-          git fetch --depth 1 origin "${GITHUB_SHA}"
-          git checkout --force FETCH_HEAD
-      - run: pip install --no-cache-dir uv
-      - run: uv sync --frozen --group dev
-      - run: uv run ruff check app.py perf_test.py test_handlers.py test_quality_gates.py
-      - run: uv run ruff format --check app.py perf_test.py test_handlers.py test_quality_gates.py
+          python - <<'PY'
+          import base64, json, os, urllib.request
+
+          token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GITEA_TOKEN") or ""
+          if not token:
+              raise SystemExit("missing job token to fetch ci_artifact.py")
+          server = os.environ["GITHUB_SERVER_URL"].rstrip("/")
+          repo = os.environ["GITHUB_REPOSITORY"]
+          sha = os.environ["GITHUB_SHA"]
+          headers = {"Authorization": f"token {token}"}
+          raw = f"{server}/api/v1/repos/{repo}/raw/scripts/ci_artifact.py?ref={sha}"
+          contents = f"{server}/api/v1/repos/{repo}/contents/scripts/ci_artifact.py?ref={sha}"
+          script = None
+          try:
+              req = urllib.request.Request(raw, headers=headers)
+              with urllib.request.urlopen(req) as resp:
+                  script = resp.read()
+          except Exception:
+              req = urllib.request.Request(
+                  contents, headers={**headers, "Accept": "application/json"}
+              )
+              with urllib.request.urlopen(req) as resp:
+                  data = json.load(resp)
+              script = base64.b64decode(data["content"])
+          if not script or b"download_artifact" not in script:
+              raise SystemExit("failed to fetch scripts/ci_artifact.py")
+          open("/tmp/ci_artifact.py", "wb").write(script)
+          PY
+          python /tmp/ci_artifact.py download prepared-env prepared-env.tar.gz
+          tar -xzf prepared-env.tar.gz
+          cp -f .ci-bin/uv /usr/local/bin/uv
+          cp -f .ci-bin/gitleaks /usr/local/bin/gitleaks
+          chmod +x /usr/local/bin/uv /usr/local/bin/gitleaks
+      - run: uv run python perf_test.py
+      - run: uv run python -m unittest discover -s . -p 'test_*.py'
+
+  sast:
+    needs: prepare
+    runs-on: ubuntu-latest
+    container:
+      image: docker.io/library/python:3.12-bookworm
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - run: |
+          python - <<'PY'
+          import base64, json, os, urllib.request
+
+          token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GITEA_TOKEN") or ""
+          if not token:
+              raise SystemExit("missing job token to fetch ci_artifact.py")
+          server = os.environ["GITHUB_SERVER_URL"].rstrip("/")
+          repo = os.environ["GITHUB_REPOSITORY"]
+          sha = os.environ["GITHUB_SHA"]
+          headers = {"Authorization": f"token {token}"}
+          raw = f"{server}/api/v1/repos/{repo}/raw/scripts/ci_artifact.py?ref={sha}"
+          contents = f"{server}/api/v1/repos/{repo}/contents/scripts/ci_artifact.py?ref={sha}"
+          script = None
+          try:
+              req = urllib.request.Request(raw, headers=headers)
+              with urllib.request.urlopen(req) as resp:
+                  script = resp.read()
+          except Exception:
+              req = urllib.request.Request(
+                  contents, headers={**headers, "Accept": "application/json"}
+              )
+              with urllib.request.urlopen(req) as resp:
+                  data = json.load(resp)
+              script = base64.b64decode(data["content"])
+          if not script or b"download_artifact" not in script:
+              raise SystemExit("failed to fetch scripts/ci_artifact.py")
+          open("/tmp/ci_artifact.py", "wb").write(script)
+          PY
+          python /tmp/ci_artifact.py download prepared-env prepared-env.tar.gz
+          tar -xzf prepared-env.tar.gz
+          cp -f .ci-bin/uv /usr/local/bin/uv
+          cp -f .ci-bin/gitleaks /usr/local/bin/gitleaks
+          chmod +x /usr/local/bin/uv /usr/local/bin/gitleaks
+      - run: uv run bandit -c pyproject.toml -r app.py scripts
+
+  pip-audit:
+    needs: prepare
+    runs-on: ubuntu-latest
+    container:
+      image: docker.io/library/python:3.12-bookworm
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - run: |
+          python - <<'PY'
+          import base64, json, os, urllib.request
+
+          token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GITEA_TOKEN") or ""
+          if not token:
+              raise SystemExit("missing job token to fetch ci_artifact.py")
+          server = os.environ["GITHUB_SERVER_URL"].rstrip("/")
+          repo = os.environ["GITHUB_REPOSITORY"]
+          sha = os.environ["GITHUB_SHA"]
+          headers = {"Authorization": f"token {token}"}
+          raw = f"{server}/api/v1/repos/{repo}/raw/scripts/ci_artifact.py?ref={sha}"
+          contents = f"{server}/api/v1/repos/{repo}/contents/scripts/ci_artifact.py?ref={sha}"
+          script = None
+          try:
+              req = urllib.request.Request(raw, headers=headers)
+              with urllib.request.urlopen(req) as resp:
+                  script = resp.read()
+          except Exception:
+              req = urllib.request.Request(
+                  contents, headers={**headers, "Accept": "application/json"}
+              )
+              with urllib.request.urlopen(req) as resp:
+                  data = json.load(resp)
+              script = base64.b64decode(data["content"])
+          if not script or b"download_artifact" not in script:
+              raise SystemExit("failed to fetch scripts/ci_artifact.py")
+          open("/tmp/ci_artifact.py", "wb").write(script)
+          PY
+          python /tmp/ci_artifact.py download prepared-env prepared-env.tar.gz
+          tar -xzf prepared-env.tar.gz
+          cp -f .ci-bin/uv /usr/local/bin/uv
+          cp -f .ci-bin/gitleaks /usr/local/bin/gitleaks
+          chmod +x /usr/local/bin/uv /usr/local/bin/gitleaks
+      - run: uv export --frozen --no-dev --no-hashes -o .requirements-audit.txt
+      - run: uv run pip-audit -r .requirements-audit.txt --progress-spinner off
+
+  gitleaks:
+    needs: prepare
+    runs-on: ubuntu-latest
+    container:
+      image: docker.io/library/python:3.12-bookworm
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - run: |
+          python - <<'PY'
+          import base64, json, os, urllib.request
+
+          token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GITEA_TOKEN") or ""
+          if not token:
+              raise SystemExit("missing job token to fetch ci_artifact.py")
+          server = os.environ["GITHUB_SERVER_URL"].rstrip("/")
+          repo = os.environ["GITHUB_REPOSITORY"]
+          sha = os.environ["GITHUB_SHA"]
+          headers = {"Authorization": f"token {token}"}
+          raw = f"{server}/api/v1/repos/{repo}/raw/scripts/ci_artifact.py?ref={sha}"
+          contents = f"{server}/api/v1/repos/{repo}/contents/scripts/ci_artifact.py?ref={sha}"
+          script = None
+          try:
+              req = urllib.request.Request(raw, headers=headers)
+              with urllib.request.urlopen(req) as resp:
+                  script = resp.read()
+          except Exception:
+              req = urllib.request.Request(
+                  contents, headers={**headers, "Accept": "application/json"}
+              )
+              with urllib.request.urlopen(req) as resp:
+                  data = json.load(resp)
+              script = base64.b64decode(data["content"])
+          if not script or b"download_artifact" not in script:
+              raise SystemExit("failed to fetch scripts/ci_artifact.py")
+          open("/tmp/ci_artifact.py", "wb").write(script)
+          PY
+          python /tmp/ci_artifact.py download prepared-env prepared-env.tar.gz
+          tar -xzf prepared-env.tar.gz
+          cp -f .ci-bin/uv /usr/local/bin/uv
+          cp -f .ci-bin/gitleaks /usr/local/bin/gitleaks
+          chmod +x /usr/local/bin/uv /usr/local/bin/gitleaks
+      - run: gitleaks git --redact --verbose --exit-code 1
+
+  lint:
+    needs: prepare
+    runs-on: ubuntu-latest
+    container:
+      image: docker.io/library/python:3.12-bookworm
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - run: |
+          python - <<'PY'
+          import base64, json, os, urllib.request
+
+          token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GITEA_TOKEN") or ""
+          if not token:
+              raise SystemExit("missing job token to fetch ci_artifact.py")
+          server = os.environ["GITHUB_SERVER_URL"].rstrip("/")
+          repo = os.environ["GITHUB_REPOSITORY"]
+          sha = os.environ["GITHUB_SHA"]
+          headers = {"Authorization": f"token {token}"}
+          raw = f"{server}/api/v1/repos/{repo}/raw/scripts/ci_artifact.py?ref={sha}"
+          contents = f"{server}/api/v1/repos/{repo}/contents/scripts/ci_artifact.py?ref={sha}"
+          script = None
+          try:
+              req = urllib.request.Request(raw, headers=headers)
+              with urllib.request.urlopen(req) as resp:
+                  script = resp.read()
+          except Exception:
+              req = urllib.request.Request(
+                  contents, headers={**headers, "Accept": "application/json"}
+              )
+              with urllib.request.urlopen(req) as resp:
+                  data = json.load(resp)
+              script = base64.b64decode(data["content"])
+          if not script or b"download_artifact" not in script:
+              raise SystemExit("failed to fetch scripts/ci_artifact.py")
+          open("/tmp/ci_artifact.py", "wb").write(script)
+          PY
+          python /tmp/ci_artifact.py download prepared-env prepared-env.tar.gz
+          tar -xzf prepared-env.tar.gz
+          cp -f .ci-bin/uv /usr/local/bin/uv
+          cp -f .ci-bin/gitleaks /usr/local/bin/gitleaks
+          chmod +x /usr/local/bin/uv /usr/local/bin/gitleaks
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .

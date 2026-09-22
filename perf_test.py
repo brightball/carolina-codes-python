@@ -122,6 +122,7 @@ if status == 200:
 else:
     expect(sql < 2 * 3, "failed listing did not run per-row SQL for N=3")
 
+app.reset_pool()
 if FAILED:
     print("perf_test failed", file=sys.stderr)
     sys.exit(1)

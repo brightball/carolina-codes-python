@@ -16,7 +16,8 @@ primary_region = "iad"
   force_https = true
   auto_stop_machines = "stop"
   auto_start_machines = true
-  min_machines_running = 0
+  # One machine stays up so idle traffic does not boot a stopped VM.
+  min_machines_running = 1
   processes = ["app"]
 
   [[http_service.checks]]

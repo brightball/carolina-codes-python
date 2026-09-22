@@ -12,9 +12,6 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-import psycopg
-from psycopg.rows import dict_row
-
 LANGUAGE = "Python"
 API_VERSION = "0.2.0"
 FRAMEWORK = "http.server"
@@ -82,12 +79,25 @@ def reset_counts() -> None:
         CONNECT_COUNT = 0
 
 
+def _close_quietly(conn) -> None:
+    closer = getattr(conn, "close", None)
+    if not callable(closer):
+        return
+    try:
+        closer()
+    except Exception:
+        return
+
+
 def reset_pool() -> None:
     global _opened, _ready
     with _pool_lock:
+        conns = list(_idle)
         _idle.clear()
         _opened = 0
         _ready = False
+    for conn in conns:
+        _close_quietly(conn)
 
 
 def dsn() -> str:
@@ -103,6 +113,9 @@ def open_connection():
         CONNECT_COUNT += 1
     if CONNECT_FN:
         return CONNECT_FN()
+    import psycopg
+    from psycopg.rows import dict_row
+
     return psycopg.connect(dsn(), row_factory=dict_row, autocommit=True)
 
 
@@ -116,27 +129,55 @@ def open_pool() -> None:
         _ready = True
 
 
+def _usable(conn) -> bool:
+    return not getattr(conn, "closed", False)
+
+
 def acquire():
     global _opened, _ready
     with _pool_lock:
-        if not _ready:
-            _idle.append(open_connection())
-            _opened = 1
-            _ready = True
         while True:
-            if _idle:
-                return _idle.pop()
+            while _idle:
+                conn = _idle.pop()
+                if _usable(conn):
+                    return conn
+                if _opened > 0:
+                    _opened -= 1
+                _close_quietly(conn)
             if _opened < POOL_SIZE:
                 _opened += 1
-                return open_connection()
+                _ready = True
+                try:
+                    return open_connection()
+                except Exception:
+                    _opened -= 1
+                    if _opened == 0:
+                        _ready = False
+                    raise
             _pool_lock.wait()
 
 
 def release(conn) -> None:
     if conn is None:
         return
+    if not _usable(conn):
+        discard(conn)
+        return
     with _pool_lock:
         _idle.append(conn)
+        _pool_lock.notify()
+
+
+def discard(conn) -> None:
+    """Drop a connection that failed a query so the next request can reconnect."""
+    global _opened, _ready
+    if conn is not None:
+        _close_quietly(conn)
+    with _pool_lock:
+        if _opened > 0:
+            _opened -= 1
+        if _opened == 0 and not _idle:
+            _ready = False
         _pool_lock.notify()
 
 
@@ -401,20 +442,34 @@ def handle_get(path, qs=None):
     conn = acquire()
     try:
         with conn.cursor() as cur:
-            return dispatch(cur, path, parts, qs)
-    finally:
-        release(conn)
+            status, payload = dispatch(cur, path, parts, qs)
+    except Exception:
+        discard(conn)
+        raise
+    release(conn)
+    return status, payload
 
 
 class DualStackServer(ThreadingHTTPServer):
     address_family = socket.AF_INET6
+    request_queue_size = 128
 
     def server_bind(self):
         self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         super().server_bind()
+
+    def process_request(self, request, client_address):
+        try:
+            request.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except OSError:
+            pass
+        super().process_request(request, client_address)
 
 
 class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
     def log_message(self, fmt, *args):
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
 
@@ -473,13 +528,18 @@ def register(port: str) -> None:
         print(f"register: {exc}", file=sys.stderr)
 
 
+def serve(port: str | None = None) -> DualStackServer:
+    # Accept health checks before any Postgres connect. Catalog routes open a
+    # pooled connection on demand.
+    chosen = port if port is not None else os.environ.get("PORT", "4004")
+    server = DualStackServer((listen_host(), int(chosen)), Handler)
+    threading.Thread(target=register, args=(chosen,), daemon=True).start()
+    print(f"carolina-codes-python listening on :{chosen}", file=sys.stderr)
+    return server
+
+
 def main():
-    open_pool()
-    port = os.environ.get("PORT", "4004")
-    threading.Thread(target=register, args=(port,), daemon=True).start()
-    server = DualStackServer((listen_host(), int(port)), Handler)
-    print(f"carolina-codes-python listening on :{port}", file=sys.stderr)
-    server.serve_forever()
+    serve().serve_forever()
 
 
 if __name__ == "__main__":

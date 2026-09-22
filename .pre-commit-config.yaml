@@ -13,12 +13,16 @@ repos:
     rev: v0.16.7
     hooks:
       - id: ruff-check
+        args: ["."]
+        pass_filenames: false
       - id: ruff-format
+        args: ["."]
+        pass_filenames: false
   - repo: https://github.com/PyCQA/bandit
     rev: 1.9.4
     hooks:
       - id: bandit
-        args: ["-c", "pyproject.toml", "-r", "app.py"]
+        args: ["-c", "pyproject.toml", "-r", "app.py", "scripts"]
         additional_dependencies: ["bandit[toml]"]
         pass_filenames: false
   - repo: https://github.com/pypa/pip-audit

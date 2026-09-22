@@ -19,13 +19,13 @@ pre-commit install
 pre-commit run --all-files
 ```
 
-Five checks run locally via pre-commit and as parallel Gitea Actions jobs (`.gitea/workflows/precommit.yml`):
+Five checks run locally via pre-commit. Gitea Actions (`.gitea/workflows/precommit.yml`) prepares the environment once, then runs those same checks as parallel jobs:
 
 | Check | Command |
 | --- | --- |
 | tests | `scripts/run_tests.sh` (`perf_test.py` + unittest; no live Postgres) |
-| linter/formatter | `uv run ruff check` and `uv run ruff format --check` |
-| SAST | `uv run bandit -c pyproject.toml -r app.py` |
+| linter/formatter | `uv run ruff check .` and `uv run ruff format --check .` |
+| SAST | `uv run bandit -c pyproject.toml -r app.py scripts` |
 | dependency audit | `scripts/pip_audit_locked.sh` (uv.lock via `uv export`) |
 | secrets | `gitleaks git --redact --verbose` |
 
