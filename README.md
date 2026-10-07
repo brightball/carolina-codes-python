@@ -2,6 +2,16 @@
 
 Read-only v1 polyglot API for Carolina Code Conference. Queries `v1_*` SQL views.
 
+## Runtime
+
+- Language: Python `>=3.11` (`requires-python` in `pyproject.toml`). The container image is `python:3.12-slim`.
+- Framework: stdlib `http.server`. There is no separate framework package. The framework version is that Python version.
+- Database client: `psycopg[binary]>=3.2` (psycopg 3).
+- Installer: uv, image pin `0.11.21` (`ghcr.io/astral-sh/uv:0.11.21`). The image installs from `uv.lock` with `uv sync --frozen --no-dev`.
+- Quality-gate tools, in the dev group and pre-commit, excluded from the runtime image: Ruff, Bandit, pip-audit, pre-commit, and gitleaks.
+
+## Run
+
 ```
 DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/carolina_dev \
 CAROLINA_URL=http://127.0.0.1:4000 \

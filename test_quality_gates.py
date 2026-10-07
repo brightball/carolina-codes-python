@@ -159,5 +159,148 @@ class QualityGateLayoutTests(unittest.TestCase):
         self.assertTrue("uv sync" in docker or "uv export" in docker)
 
 
+DOC_NAMES = ("AGENTS.md", "README.md", "MEMORY.md", "DECISIONS.md")
+
+_PG_URL = re.compile(r"postgres(?:ql)?://[^\s)\]>'\"`]+", re.I)
+_ALLOWED_DSN = "postgres://postgres:postgres@127.0.0.1:5432/carolina_dev"
+_TOKEN_PREFIX = re.compile(
+    r"(?:ghp_|gho_|ghu_|ghs_|ghr_|github_pat_|glpat-|xox[abprs]-|sk-|AKIA)[A-Za-z0-9_-]{4,}"
+)
+_TAILNET_HOST = re.compile(r"\b[\w.-]+\.ts\.net\b", re.I)
+
+AGENTS_PHRASES = (
+    "read-only `v1_*` views",
+    "Do not query Ash tables",
+    "Register once on boot",
+    "keep serving if `CAROLINA_URL` is unset or the POST fails",
+    "`DATABASE_URL`",
+    "`CAROLINA_URL`",
+    "`POLYGLOT_REGISTER_TOKEN`",
+    "`PUBLIC_BASE_URL`",
+    "`PORT`",
+    "its own git remote",
+    "Do not assume a sibling CMS checkout",
+    "CMS OpenAPI",
+    "not a local starter `openapi.yaml`",
+    "stdlib `http.server`",
+    "GET /health` does not open Postgres",
+    '{"ok": true}',
+    '{"status": "ok"}',
+    "dual-stack IPv6",
+    "Catalog SQL uses psycopg",
+    "Ruff",
+    "Bandit",
+    "pip-audit",
+    "gitleaks",
+    "pre-commit",
+    "one job per check",
+    "Append a record to DECISIONS.md when a durable choice changes",
+    "Append a note to MEMORY.md when a repeated operational gotcha appears",
+    "](MEMORY.md)",
+    "](DECISIONS.md)",
+)
+
+DECISION_PHRASES = (
+    "stdlib `http.server` instead of a third-party web framework",
+    "psycopg 3",
+    "uv lockfile",
+    "dev tools excluded from the runtime image",
+    "health checks before any Postgres connection",
+    "dual-stack IPv6",
+    "Fly 6PN",
+    "Views-only SQL",
+    "pre-commit",
+    "one Gitea job per check",
+    "**Status:**",
+    "**Context:**",
+    "**Decision:**",
+    "**Consequences:**",
+)
+
+MEMORY_PHRASES = (
+    "fake catalog",
+    "need no Postgres",
+    "4004",
+    "8080",
+    "sslmode=disable",
+    "appended when",
+    "must not open psycopg",
+    "gitleaks",
+    _ALLOWED_DSN,
+    "DECISIONS.md",
+)
+
+README_PHRASES = (
+    ">=3.11",
+    "python:3.12",
+    "http.server",
+    "no separate framework package",
+    "framework version is that Python version",
+    "psycopg[binary]>=3.2",
+    "0.11.21",
+    "uv",
+    "Ruff",
+    "Bandit",
+    "pip-audit",
+    "pre-commit",
+    "gitleaks",
+)
+
+
+def _private_hits(text: str) -> list[str]:
+    hits: list[str] = []
+    if "x-access-token" in text.lower():
+        hits.append("x-access-token")
+    hits.extend(match.group(0) for match in _TOKEN_PREFIX.finditer(text))
+    hits.extend(match.group(0) for match in _TAILNET_HOST.finditer(text))
+    for match in _PG_URL.finditer(text):
+        url = match.group(0).rstrip(".,")
+        if url != _ALLOWED_DSN:
+            hits.append(url)
+    return hits
+
+
+class DocContractTests(unittest.TestCase):
+    def _read(self, name: str) -> str:
+        path = ROOT / name
+        self.assertTrue(path.is_file(), f"missing {name}")
+        return path.read_text()
+
+    def test_agents_records_contract_divergences_and_doc_links(self):
+        text = self._read("AGENTS.md")
+        for phrase in AGENTS_PHRASES:
+            self.assertIn(phrase, text, phrase)
+
+    def test_decisions_record_context_and_consequences(self):
+        text = self._read("DECISIONS.md")
+        for phrase in DECISION_PHRASES:
+            self.assertIn(phrase, text, phrase)
+        self.assertGreaterEqual(text.count("**Context:**"), 6)
+        self.assertGreaterEqual(text.count("**Consequences:**"), 6)
+        self.assertGreaterEqual(text.count("**Decision:**"), 6)
+
+    def test_memory_indexes_gotchas_without_copying_decisions(self):
+        text = self._read("MEMORY.md")
+        for phrase in MEMORY_PHRASES:
+            self.assertIn(phrase, text, phrase)
+        self.assertNotIn("third-party web framework", text)
+        self.assertNotIn("one Gitea job per check", text)
+        self.assertNotIn("**Consequences:**", text)
+
+    def test_readme_states_language_framework_and_notable_packages(self):
+        text = self._read("README.md")
+        for phrase in README_PHRASES:
+            self.assertIn(phrase, text, phrase)
+        self.assertIn("uv sync --group dev", text)
+        self.assertIn("pre-commit run --all-files", text)
+        self.assertIn("bandit -c pyproject.toml -r app.py scripts", text)
+
+    def test_docs_have_no_private_data(self):
+        for name in DOC_NAMES:
+            text = self._read(name)
+            hits = _private_hits(text)
+            self.assertEqual(hits, [], f"{name} private-data hits: {hits}")
+
+
 if __name__ == "__main__":
     unittest.main()
