@@ -16,8 +16,8 @@ primary_region = "iad"
   force_https = true
   auto_stop_machines = "stop"
   auto_start_machines = true
-  # One machine stays up so idle traffic does not boot a stopped VM.
-  min_machines_running = 1
+  # Idle machines stop. The Phoenix app keeps one language API warm.
+  min_machines_running = 0
   processes = ["app"]
 
   [[http_service.checks]]

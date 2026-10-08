@@ -140,15 +140,16 @@ class QualityGateLayoutTests(unittest.TestCase):
         self.assertIn("ruff check .", readme)
         self.assertIn("ruff format --check .", readme)
 
-    def test_fly_keeps_a_machine_and_image_uses_the_lockfile(self):
+    def test_fly_scales_to_zero_and_image_uses_the_lockfile(self):
         fly = (ROOT / "fly.toml").read_text()
+        self.assertIn('auto_stop_machines = "stop"', fly)
         self.assertIn("auto_start_machines = true", fly)
         self.assertIn("internal_port = 8080", fly)
         self.assertIn('method = "GET"', fly)
         self.assertIn('path = "/health"', fly)
         match = re.search(r"(?m)^\s*min_machines_running\s*=\s*(\d+)\s*$", fly)
         self.assertIsNotNone(match)
-        self.assertGreaterEqual(int(match.group(1)), 1)
+        self.assertEqual(int(match.group(1)), 0)
 
         docker = (ROOT / "Dockerfile").read_text()
         self.assertIn("uv.lock", docker)
